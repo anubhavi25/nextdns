@@ -3,69 +3,61 @@ package endpoint
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
 	"net/http"
 	"net/http/httptrace"
-	"sync"
 	"time"
 )
 
 type ConnectInfo struct {
-	Connect      bool
-	ServerAddr   string
-	ConnectTimes map[string]time.Duration
-	Protocol     string
-	TLSTime      time.Duration
-	TLSVersion   string
-}
-
-type timer struct {
-	start time.Time
-	dur   time.Duration
-}
-
-func (t *timer) done() {
-	t.dur = time.Since(t.start)
+	ConnectStatus      string
+	ServerAddr         string
+	ConnectTime        time.Duration
+	Protocol           string
+	TLSTime            time.Duration
+	TLSVersion         string
+	TLSALPNProtocol    string
+	TLSCipherSuiteName string
+	TLSSNIExtAddr      string
+	TLSHandshakeStatus string
 }
 
 func withConnectInfo(ctx context.Context) (context.Context, *ConnectInfo) {
 	ci := &ConnectInfo{Protocol: "TCP"}
-	mu := &sync.Mutex{}
-	connectTimes := map[string]*timer{}
+	var connectStart time.Time
 	var tlsStart time.Time
 	return httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
 		ConnectStart: func(network, addr string) {
-			mu.Lock()
-			defer mu.Unlock()
-			connectTimes[addr] = &timer{start: time.Now()}
+			connectStart = time.Now()
 		},
 		ConnectDone: func(network, addr string, err error) {
-			mu.Lock()
-			defer mu.Unlock()
-			if t := connectTimes[addr]; t != nil {
-				t.done()
+			if err != nil {
+				ci.ConnectStatus = err.Error()
+			} else {
+				ci.ConnectStatus = "ok"
 			}
+			ci.ConnectTime = time.Since(connectStart)
 		},
 		TLSHandshakeStart: func() {
 			tlsStart = time.Now()
 		},
 		TLSHandshakeDone: func(cs tls.ConnectionState, err error) {
+			if err != nil {
+				ci.TLSHandshakeStatus = err.Error()
+			} else {
+				ci.TLSHandshakeStatus = "ok"
+			}
 			ci.TLSTime = time.Since(tlsStart)
 			ci.TLSVersion = tlsVersion(cs.Version)
+			ci.TLSALPNProtocol = cs.NegotiatedProtocol
+			ci.TLSCipherSuiteName = tls.CipherSuiteName(cs.CipherSuite)
+			ci.TLSSNIExtAddr = cs.ServerName
 		},
 		GotConn: func(hci httptrace.GotConnInfo) {
-			mu.Lock()
-			defer mu.Unlock()
-			if hci.Reused {
-				return
-			}
-			ci.Connect = true
 			if hci.Conn != nil {
 				ci.ServerAddr = hci.Conn.RemoteAddr().String()
-				ci.ConnectTimes = make(map[string]time.Duration, len(connectTimes))
-				for addr, t := range connectTimes {
-					ci.ConnectTimes[addr] = t.dur
-				}
+			}
+			if hci.Reused {
+				return
 			}
 		},
 	}), ci
@@ -74,15 +66,16 @@ func withConnectInfo(ctx context.Context) (context.Context, *ConnectInfo) {
 func tlsVersion(v uint16) string {
 	switch v {
 	case tls.VersionTLS10:
-		return "TLS10"
+		return "1.0"
 	case tls.VersionTLS11:
-		return "TLS11"
+		return "1.1"
 	case tls.VersionTLS12:
-		return "TLS12"
+		return "1.2"
 	case tls.VersionTLS13:
-		return "TLS13"
+		return "1.3"
+	default:
+		return "unknown"
 	}
-	return fmt.Sprintf("TLS<%d>", v)
 }
 
 type roundTripperConnectTracer struct {
@@ -94,7 +87,7 @@ func (rt roundTripperConnectTracer) RoundTrip(req *http.Request) (resp *http.Res
 	ctx, ci := withConnectInfo(req.Context())
 	req = req.WithContext(ctx)
 	resp, err = rt.RoundTripper.RoundTrip(req)
-	if ci.Connect {
+	if ci.ConnectStatus == "ok" {
 		rt.OnConnect(ci)
 	}
 	return resp, err

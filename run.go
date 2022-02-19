@@ -212,7 +212,6 @@ func run(args []string) error {
 		})
 	}
 
-	startup := time.Now()
 	p.resolver = &resolver.DNS{
 		DOH: resolver.DOH{
 			ExtraHeaders: http.Header{
@@ -223,12 +222,7 @@ func run(args []string) error {
 			// Backward compat: the captive portal is now somewhat always enabled,
 			// but for those who enabled it in the past, disable the delay after which
 			// the fallback is disabled.
-			if c.DetectCaptivePortals {
-				return true
-			}
-			// Allow fallback to plain DNS for 10 minute after startup or after
-			// a change of network configuration.
-			return time.Since(startup) < 10*time.Minute
+			return c.DetectCaptivePortals
 		}),
 	}
 
@@ -372,14 +366,12 @@ func run(args []string) error {
 		// If only listening on localhost, we may be running on a laptop or
 		// other sort of device that might change network from time to time.
 		// When such change is detected, it better to trigger a re-negotiation
-		// of the best endpoint sooner than later. We also reset the startup
-		// time so plain DNS fallback happen again (useful for captive portals).
+		// of the best endpoint sooner than later.
 		p.OnInit = append(p.OnInit, func(ctx context.Context) {
 			netChange := make(chan netstatus.Change)
 			netstatus.Notify(netChange)
 			for c := range netChange {
 				log.Infof("Network change detected: %s", c)
-				startup = time.Now() // reset the startup marker so DNS fallback can happen again.
 				if err := p.resolver.Manager.Test(ctx); err != nil {
 					log.Errorf("Test after network change failed: %v", err)
 				}
@@ -430,17 +422,6 @@ func nextdnsEndpointManager(log host.Logger, canFallback func() bool) *endpoint.
 				Hostname: "dns.nextdns.io",
 				Source:   endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::"),
 			},
-			// Try routing without anycast bootstrap.
-			// TOFIX: this creates circular dependency if the /etc/resolv.conf is setup to localhost.
-			// &endpoint.SourceHTTPSSVCProvider{
-			// 	Hostname: "dns.nextdns.io",
-			// 	Source:   endpoint.MustNew("https://dns.nextdns.io"),
-			// },
-			// Fallback on anycast.
-			endpoint.StaticProvider([]endpoint.Endpoint{
-				endpoint.MustNew("https://dns1.nextdns.io#45.90.28.0,2a07:a8c0::"),
-				endpoint.MustNew("https://dns2.nextdns.io#45.90.30.0,2a07:a8c1::"),
-			}),
 		},
 		InitEndpoint: endpoint.MustNew("https://dns.nextdns.io#45.90.28.0,2a07:a8c0::,45.90.30.0,2a07:a8c1::"),
 		OnError: func(e endpoint.Endpoint, err error) {
@@ -450,12 +431,17 @@ func nextdnsEndpointManager(log host.Logger, canFallback func() bool) *endpoint.
 			log.Warningf("Endpoint provider failed: %v: %v", p, err)
 		},
 		OnConnect: func(ci *endpoint.ConnectInfo) {
-			log.Infof("Connected %s (con=%dms tls=%dms, %s, %s)",
+			log.Infof("Connected %s (Con: time=%dms, prot=%s, status=%s; TLS: time=%dms, v=%s, negprot=%s, cipher=%s, sniaddr=%s, status=%s)",
 				ci.ServerAddr,
-				ci.ConnectTimes[ci.ServerAddr]/time.Millisecond,
-				ci.TLSTime/time.Millisecond,
+				ci.ConnectTime/time.Millisecond,
 				ci.Protocol,
-				ci.TLSVersion)
+				ci.ConnectStatus,
+				ci.TLSTime/time.Millisecond,
+				ci.TLSVersion,
+				ci.TLSALPNProtocol,
+				ci.TLSCipherSuiteName,
+				ci.TLSSNIExtAddr,
+				ci.TLSHandshakeStatus)
 		},
 		OnChange: func(e endpoint.Endpoint) {
 			log.Infof("Switching endpoint: %s", e)
@@ -466,25 +452,18 @@ func nextdnsEndpointManager(log host.Logger, canFallback func() bool) *endpoint.
 	// allows automatic handling of captive portals as well as NTP / DNS
 	// inter-dependency on some routers, when NTP needs DNS to sync the time,
 	// and DoH needs time properly set to establish a TLS session.
-	m.Providers = append(m.Providers, endpoint.ProviderFunc(func(ctx context.Context) ([]endpoint.Endpoint, error) {
-		if !canFallback() {
-			// Fallback disabled.
-			return nil, nil
-		}
-		ips := host.DNS()
-		endpoints := make([]endpoint.Endpoint, 0, len(ips)+1)
-		for _, ip := range ips {
-			endpoints = append(endpoints, &endpoint.DNSEndpoint{
-				Addr: net.JoinHostPort(ip, "53"),
-			})
-		}
-		// Add NextDNS anycast IP in case none of the system DNS works or we did
-		// not find any.
-		endpoints = append(endpoints, &endpoint.DNSEndpoint{
-			Addr: "45.90.28.0:53",
-		})
-		return endpoints, nil
-	}))
+	if canFallback() {
+		m.Providers = append(m.Providers, endpoint.ProviderFunc(func(ctx context.Context) ([]endpoint.Endpoint, error) {
+			ips := host.DNS()
+			endpoints := make([]endpoint.Endpoint, 0, len(ips)+1)
+			for _, ip := range ips {
+				endpoints = append(endpoints, &endpoint.DNSEndpoint{
+					Addr: net.JoinHostPort(ip, "53"),
+				})
+			}
+			return endpoints, nil
+		}))
+	}
 	m.EndpointTester = func(e endpoint.Endpoint) endpoint.Tester {
 		if e.Protocol() == endpoint.ProtocolDNS {
 			// Return a tester than never fail so we are always selected as

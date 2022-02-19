@@ -201,7 +201,11 @@ install_bin() {
         bin_path=$1
     fi
     log_debug "Installing $INSTALL_RELEASE binary for $GOOS/$GOARCH to $bin_path"
+    unset snapshot_archive_name
     case "$INSTALL_RELEASE" in
+    *-SNAPSHOT-*)
+        snapshot_archive_name="nextdns_${INSTALL_RELEASE}_${GOOS}_${GOARCH}.tar.gz"
+        ;;
     */*)
         # Snapshot
         branch=${INSTALL_RELEASE%/*}
@@ -212,9 +216,13 @@ install_bin() {
         url="https://github.com/nextdns/nextdns/releases/download/v${INSTALL_RELEASE}/nextdns_${INSTALL_RELEASE}_${GOOS}_${GOARCH}.tar.gz"
         ;;
     esac
-    log_debug "Downloading $url"
     asroot mkdir -p "$(dirname "$bin_path")" &&
-        curl -sL "$url" | asroot sh -c "tar Ozxf - nextdns > \"$bin_path\"" &&
+        if [ -n "$snapshot_archive_name" ]; then \
+            log_debug "Extracting ./${snapshot_archive_name}"; cat ./"$snapshot_archive_name"; \
+        else \
+            log_debug "Downloading $url"; curl -sL "$url"; \
+        fi | \
+        asroot sh -c "tar Ozxf - nextdns > \"$bin_path\"" &&
         asroot chmod 755 "$bin_path"
 }
 

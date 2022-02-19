@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"runtime"
-	"time"
 )
 
 type transport struct {
@@ -26,23 +25,7 @@ func newTransportH2(e *DOHEndpoint, addrs []string) http.RoundTripper {
 			ClientSessionCache: tls.NewLRUClientSessionCache(0),
 		},
 		DialContext: func(ctx context.Context, network, _ string) (c net.Conn, err error) {
-			c, err = d.DialParallel(ctx, network, addrs)
-			if c != nil {
-				// Try to workaround the bug describe in this issue:
-				// https://github.com/golang/go/issues/23559
-				//
-				// All write operations are surrounded with a 5s deadline that
-				// will close the h2 connection if reached. This is not a proper
-				// fix but an attempt to mitigate the issue waiting for an
-				// upstream fix.
-				//
-				// See #196 for more info.
-				c = deadlineConn{
-					Conn:    c,
-					timeout: 5 * time.Second,
-				}
-			}
-			return c, err
+			return d.DialParallel(ctx, network, addrs)
 		},
 		ForceAttemptHTTP2: true,
 	}

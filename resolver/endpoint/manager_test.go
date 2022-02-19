@@ -9,7 +9,6 @@ import (
 	"runtime"
 	"sync"
 	"testing"
-	"time"
 )
 
 type errProvider struct {
@@ -41,7 +40,6 @@ type testManager struct {
 	mu          sync.Mutex
 	transports  map[string]*errTransport
 	elected     string
-	now         time.Time
 	errs        []string
 	perrs       []string
 	errProvider *errProvider
@@ -81,19 +79,12 @@ func (m *testManager) wantProviderErrors(t *testing.T, wantErrors []string) {
 	}
 }
 
-func (m *testManager) addTime(d time.Duration) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.now = m.now.Add(d)
-}
-
 func newTestManager(t *testing.T) *testManager {
 	m := &testManager{
 		transports: map[string]*errTransport{
 			"https://a": {},
 			"https://b": {},
 		},
-		now:         time.Now(),
 		errs:        []string{},
 		errProvider: &errProvider{},
 	}
@@ -125,11 +116,6 @@ func newTestManager(t *testing.T) *testManager {
 		},
 		testNewTransport: func(e *DOHEndpoint) http.RoundTripper {
 			return m.transports[e.String()]
-		},
-		testNow: func() time.Time {
-			m.mu.Lock()
-			defer m.mu.Unlock()
-			return m.now
 		},
 	}
 	return m
@@ -186,25 +172,6 @@ func TestManager_AutoRecover(t *testing.T) {
 			m.do()
 			m.wantElected(t, wantElected)
 			runtime.Gosched() // recovery happens in a goroutine
-		})
-	}
-}
-
-func TestManager_OpportunisticTest(t *testing.T) {
-	t.SkipNow()
-	// Start with first endpoint failed, then recover it to ensure the client eventually goes back to it.
-	m := newTestManager(t)
-	m.MinTestInterval = 2 * time.Hour
-
-	m.transports["https://a"].errs = []error{errors.New("a failed"), nil} // fails once then recover
-	m.transports["https://b"].errs = nil
-
-	for i, wantElected := range []string{"https://b", "https://b", "https://b", "https://b", "https://a"} {
-		t.Run(fmt.Sprintf("#%d", i), func(t *testing.T) {
-			m.do()
-			runtime.Gosched()
-			m.wantElected(t, wantElected)
-			m.addTime(35 * time.Minute)
 		})
 	}
 }

@@ -74,7 +74,6 @@ type Manager struct {
 	activeEndpoint *activeEnpoint
 
 	testNewTransport func(e *DOHEndpoint) http.RoundTripper
-	testNow          func() time.Time
 }
 
 type Tester func(ctx context.Context, testDomain string) error
@@ -187,9 +186,6 @@ func (m *Manager) newActiveEndpointLocked(e Endpoint) (ae *activeEnpoint) {
 			ae.testInterval = DefaultMinTestInterval
 		}
 	}
-	if m.testNow != nil {
-		ae.lastTest = m.testNow()
-	}
 	if doh, ok := e.(*DOHEndpoint); ok {
 		if m.testNewTransport != nil {
 			// Used in unit test to provide fake transport.
@@ -273,17 +269,10 @@ func (e *activeEnpoint) shouldTest() bool {
 }
 
 func (e *activeEnpoint) testTimeExceededLocked() bool {
-	if e.manager.testNow != nil {
-		return e.manager.testNow().Sub(e.lastTest) > e.testInterval
-	}
 	return time.Since(e.lastTest) > e.testInterval
 }
 
 func (e *activeEnpoint) resetLastTestLocked() {
-	if e.manager.testNow != nil {
-		e.lastTest = e.manager.testNow()
-		return
-	}
 	e.lastTest = time.Now()
 }
 
